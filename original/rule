@@ -1,0 +1,159 @@
+[Rule table
+[Note that at least two comment lines (or at least, null lines) are used
+[as separators between lexical categories.
+[eou
+!
+[
+[eotg
+.
+;
+[
+[tg: followed by pitches defining each contour for ruleind 0 and (optionally) 1
+[-------------------------------------------
+0      0 110   0 -15   0 -40 -20   0  33  50
+1      0 110   0 -15   0 -40 -20   0  33  50
+1+     0 110  30 -15   0 -65 -20   0  33  50
+1-     0 110 -20 -15   0 -25 -20   0  33  50
+2      0 140   0 -15 -55  50  20   0  33  25
+       0 180   0 -25 -45  45  45   0  33  50 [can optionally specify
+2-     0 100   0 -15   0  40  20   0  33  25
+       0 100   0 -25   0  45  45   0  33  25 [contours for rulind=1
+3      0 110   0 -15 -35  25  -5   0  33  33
+       0 100   0 -25 -45  45   0   0  33  33 [table like this
+3-     0 100   0 -15   0  25   0   0  33  33
+4      0 140 -30 -15  15  25 -25   0  33  75
+5      0 110  20 -15 -15 -25  25   0  33  25
+[-------------------------------------------
+[
+[foot: followed by stressed/unstressed flag, then target foot duration
+/  0 40
+/* 1 40
+[
+[word
+    [two spaces for a word boundary
+[
+[syll: followed by minimum syllable duration
+"  14
+[
+[ph
+[  flags are
+[    bit     1  -  VOWEL  (set for vowels)
+[    bit     2  -  LVOWEL (set for long vowels)
+[    bit     4  -  NASAL  (set for nasals)
+[    bit     8  -  BREATH (set for ^)
+[    bit    16  -  STOP   (set for plosives)
+[    bit    32  -  GLIDE  (set for glides)
+[    bit    64  -  H      (set for h)
+[    bit   128  -  F3X    (set for all glides except "r")
+[
+[  durations are derived from work by IHW/DRH at Calgary in the summer of
+[  1977.  (SU30, phdur model.)
+[
+[      flags dur  av   as   f1   f2   f3   fh
+[---------------------------------------------------
+^          8   6    0    0  490 1480 2500 2500
+h         64   6   60    0  490 1480 2500 2500
+uh         1   5   60    0  490 1480 2500 2500
+a          1   8   60    0  720 1240 2540 2500
+e          1   7   60    0  560 1970 2640 2500
+i          1   6   60    0  360 2100 2700 2500
+o          1   8   60    0  600  890 2600 2500
+u          1   6   60    0  380  950 2440 2500
+aa         1   9   60    0  750 1750 2600 2500
+           1   9   60    0  500 1500 2500 2500 [can optionally specify
+ee         3   9   60    0  290 2270 3090 2500
+           3   9   60    0  250 2000 3000 2500 [values for rulind=1
+er         3  15   60    0  580 1380 2440 2500
+           3  15   60    0  500 1000 2000 2500 [table like this
+ar         3  12   60    0  680 1080 2540 2500
+aw         3  13   60    0  450  740 2640 2500
+uu         3   7   60    0  310  940 2320 2500
+r         32   4   60    0  240 1190 1550 2500
+w        160   5   60    0  240  650 2500 2500
+l        160   6   60    0  380 1190 3000 2500
+y        160   6   60    0  240 2270 3000 2500
+m          4   6   40    0  190  690 2000 2500
+b         16   7   20    0  100  690 2000 2500
+p         16   9    0    0  100  690 2000 2500
+n          4   6   40    0  190 1780 3300 2500
+d         16   5   20    0  100 1780 3300 2500
+t         16   8    0    0  100 1780 3300 2500
+ng         4   6   40    0  190 2300 2500 2500
+g         16   6   20    0  100 2300 2500 2500
+k         16   8    0    0  100 2300 2500 2500
+s          0   9    0   50  190 1780 3300 6000
+z          0   6   40   50  190 1780 3300 6000
+sh         0   7    0   60  190 2120 2700 2300
+zh         0   5   40   60  190 2120 2700 2300
+f          0   8    0   20  190  690 3300 4000
+v          0   5   40   20  190  690 3300 4000
+th         0   6    0   10  190 1780 3300 5000
+dh         0   5   40   10  190 1780 3300 5000
+[---------------------------------------------------
+[
+[dur
+dd   [eg "ar dd10 pp0 25 pp5 30" is like "AR D10 P0 25 P5 30"
+[
+[pit
+pp
+[
+[miscellaneous parameter table
+[
+[ttmisc:  parameters for computing phoneme transition times
+   4   2          [...<glide> or <vowel> <vowel>: min total dur, and
+                  [steady-state time
+   4   2          [...<stop or nasal>: min total dur, and transition time
+   4   2          [<stop or nasal>...: min total dur, and transition time
+   5   4          [otherwise: min total dur, and transition time
+[aspmisc:  duration of aspiration after an unvoiced stop
+  2               [if stop isn't syllable-initial
+  3               [if stop is syllable-initial
+  4               [if stop is stressed-syllable-initial
+  6               [if stop is tonic-stressed-syllable-initial
+  0               [if stop is preceded by an "s" in C1 cluster
+[stopmisc:  value of as burst on stop release
+ 60
+[iclmisc:  sound type specifications for icl synthesizer in terms of fh
+  6000          [s
+  4000          [f
+  5000          [th
+-10000          [h
+  2300          [sh
+[iclfric:  parameters for adjusting the icl fricative amplitude.
+[set to 0 for maximum; increase to decrease friction.
+ 5                [for unvoiced fricatives
+ 2                [for voiced fricatives
+[
+[syllmisc: syllable weights
+[-----------------------------------------------
+ 50  50           [ <strong> <enclitic>
+ 67  33           [ <strong> <proclitic>
+ 33  67           [ <weak>   <enclitic>
+150  50 100       [ <strong> <enclitic>  <enclitic>
+100 150  50       [ <strong> <enclitic>  <proclitic>
+150  75  75       [ <strong> <proclitic> <proclitic>
+100 100 100       [ <weak>   <enclitic>  <enclitic>
+ 50 150 100       [ <weak>   <enclitic>  <proclitic>
+[-----------------------------------------------
+[
+[phmisc:  phoneme expansion/contraction bounds
+[(see "A flexible scheme for assigning timing and pitch ...")
+  0       [minimum offset for int phoneme (unmarked feet)
+  0       [maximum offset for int phoneme (unmarked feet)
+100       [minimum factor for int phoneme (%) (unmarked feet)
+100       [maximum factor for int phoneme (%) (unmarked feet)
+  0       [minimum offset for ext phoneme (unmarked feet)
+  0       [maximum offset for ext phoneme (unmarked feet)
+100       [minimum factor for ext phoneme (%) (unmarked feet)
+100       [maximum factor for ext phoneme (%) (unmarked feet)
+  0       [minimum offset for int phoneme (marked feet)
+  1       [maximum offset for int phoneme (marked feet)
+100       [minimum factor for int phoneme (%) (marked feet)
+100       [maximum factor for int phoneme (%) (marked feet)
+  0       [minimum offset for ext phoneme (marked feet)
+  8       [maximum offset for ext phoneme (marked feet)
+100       [minimum factor for ext phoneme (%) (marked feet)
+100       [maximum factor for ext phoneme (%) (marked feet)
+[
+[maximum rate of change of pitch allowed when highlighting pretonic feet
+ 10       [msec for a 1 Hz decline in pitch

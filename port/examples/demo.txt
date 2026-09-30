@@ -1,0 +1,8 @@
+[ Each utterance ends with "!".  Tone groups end with "." or ";".
+[ "/" starts a foot (unstressed), "/*" a stressed foot; two spaces = word boundary.
+[ A leading 1, 1+, 1-, 2, 2-, 3, 3-, 4 or 5 picks the intonation contour.
+1 dhis  iz  dhuh  /hauus  dhuht  /*dzhaak  bilt. !
+2 /*iz  it  /reedee. !
+1 /hel  /*ou. !
+@s
+3 /wun  /*too; 1 /three  /*for. !

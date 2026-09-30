@@ -1,0 +1,2248 @@
+#include "isp.h"
+
+main()
+{
+    struct listelt *p;
+    int rulerror;
+
+    for (ever) {
+        init();
+        clrparbuf();
+        rulerror = 0;
+        if(grules()){
+            if(rulerror++ == 4)abortit("Failed to find rules 4 times.\r\n");
+            strout("Trying to read the rules again.\r\n");
+            continue;
+            }
+        while ((p = uttread()) != 0) {
+            rhythm(p);
+            pitch(p);
+            if (omode == OSYNLST){
+                prsynlst(p);
+                jputchar('\04',PARALLEL);
+            }
+            else {
+                seginit(p);
+                if (omode == OPARMS){
+                        while (pparm(syntyp));
+                        jputchar('\04',PARALLEL);
+                }
+                else {
+                    pd[syntyp].state = 1;
+                    if (syntyp == PATTYP) PATADDR->csr =| INTRUPTA;
+                    else if (syntyp == ICLTYP) ICLADDR->csr =| INTRUPTA;
+                    else if (syntyp == COMTYP) {
+                        COMADDR->writebuf = 15*(1<<8) + 255;  /* let COMPUTALKER rip */
+                        COMADDR->csr =| INTRUPTA;
+                    }
+                    else abortit("main: illegal synthesizer type");
+        }
+    }
+}
+
+init()
+{
+    int i, j;
+    syntyp = PATTYP;
+    omode = OSPEECH;
+    reporterrors = 1;
+    pr = 0;
+    in_chan = 1;
+    cha = ' ';
+        PATADDR->csr =& ~INTRUPTA;
+        ICLADDR->csr =& ~INTRUPTA;
+        COMADDR->csr =& ~INTRUPTA;
+        COMADDR->writebuf = 15*(1<<8) + 0;  /* shut up COMPUTALKER */
+    for (i = 0; i < NSYNS; i++) {
+        pd[i].state = 0;
+        for (j = 0; j < NPHYS; j++) pd[i].parms[j] = 0;
+        for (j = 0; j < NERRORS; j++) pd[i].error[j] = 0;
+    }
+}
+char *strule "rule table";
+clrparbuf(){
+int letter;
+char c;
+letter = 0;
+while(letter<10){
+    if(((c = getdr(0)) | 040) != strule[letter++]){
+        letter = 0;
+        if(c == '\0')strout("EOF found clearing DR buffer\n");
+        }
+    }
+while(getdr(0) != '\n');
+strout("DR cleared\r\n");
+}
+
+
+
+#define NMISC         NTTMISC+NASPMISC+NSTOPMISC+NICLMISC+NICLFRIC+NSYLLMISC
+                      +NPHMISC+NPITMISC
+#define NTTMISC         8
+#define NASPMISC        5
+#define NSTOPMISC       1
+#define NICLMISC        5
+#define NICLFRIC        2
+#define NSYLLMISC      21
+#define NPHMISC        16
+#define NPITMISC        1
+
+/*
+ * Read in the rule table, and re-initialize space and free list.
+ * Rule table comprises a file called "rule", with
+ *    (a) a list of lexes and their associated data,
+ *        sorted into types and ordered by the type number,
+ *        with at least one blank or comment line between
+ *        each type;
+ *    (b) NMISC miscellaneous parameters, arbitrarily disposed
+ *        w.r.t. lines.
+ */
+grules()
+{
+    char c;
+    int lextyp, lexind, rulei, i, firstlex;
+
+    in_chan = PARALLEL;
+    spacep = space;
+    freep = 0;
+    lextyp = lexind = -1;
+/* read in lexes and lex data */
+    for (ever) switch (c = chin(in_chan)) {
+    case '\0':
+        strout("premature end of 'rule' file.\r\n");
+        return(1);
+    case '\n':
+        if (++lextyp >= NLEXTYPS) goto miscs;
+        while ((c = chin(in_chan)) == '\n')
+        firstlex=1;
+    default:
+        rulei = -1;
+        lex[++lexind][0] = c;
+        c = chin(in_chan);
+        lex[lexind][1] = c == '\n' ? ' ' : c;
+    case ' ':
+        rulei = ++rulei < NRULE ? rulei : NRULE-1;
+        for (i = rulei; i < NRULE; i++) lexindex[lexind][i] = spacep;
+        *spacep++ = lextyp;
+        if (c != '\n') spacep =+ i = intsin(spacep);
+        else i=0;
+        if (firstlex == 1) nrulelts[lextyp] = i+1;
+        firstlex = 0;
+        if (nrulelts[lextyp] != i+1){
+            strout("incorrect number of lex data items in 'rule'\r\n");
+            return(1);
+        }
+        if (lextyp > MAXLEX-2){
+            strout("too many lexes in 'rule'\r\n");
+            return(1);
+        }
+    }
+/* read the miscellaneous parameters */
+miscs:
+    nlexes = ++lexind;
+    lex[lexind][0] = 0; /* terminator used by findlex */
+    misc = spacep;
+    while(spacep-misc < NMISC) spacep =+ intsin(spacep);
+    if (spacep - misc != NMISC){
+        strout("incorrect number of misc parameters in 'rule' file\r\n");
+        return(1);
+    }
+/* set up globals for accessing misc table */
+    ttmisc = misc;
+    aspmisc = ttmisc + NTTMISC;
+    stopmisc = aspmisc + NASPMISC;
+    iclmisc = stopmisc + NSTOPMISC;
+    iclfric = iclmisc + NICLMISC;
+    syllmisc = iclfric + NICLFRIC;
+    phmisc = syllmisc + NSYLLMISC;
+    pitmisc = phmisc + NPHMISC;
+    in_chan = SERIAL;
+    strout("rules read ok\r\n");
+    return(0);
+}
+
+
+
+/*
+ * Read an utterance and store it as a synthesis list,
+ * returning ptr.
+ * If zero is returned, restart isp.
+ */
+struct listelt *uttread()
+{
+    struct listelt *syntop;
+    char ch1;
+    int i;
+
+    pp = syntop = allocit();
+    pp->content[0] = SOUTYP; /* first element of synlst is SOUTYP */
+    for (ever) {
+        adchar(&ch1, &cha);
+        if (ch1 == '\0') abortit("read: eof received on input");
+        else if (ch1 == '@') {
+            adchar(&ch1, &cha);
+            switch (ch1) {
+            case 's':
+                return (0); /* restart isp */
+            case 'r':
+                if ((i = intin(&cha)) < 0 || i >= NRULE)
+                    strout ("illegal rule table index\r\n");
+                else pr = i;
+                break;
+            case 'o':
+                omode = intin(&cha);
+                syntyp = intin(&cha);
+                break;
+            case 'm':
+                if((( cha = chin(in_chan)) == 's') || ( cha == 'p')){
+                        if(cha == 's') in_chan = SERIAL;
+                        else in_chan = PARALLEL;
+                        }
+                else {
+                        strout("  Error: s or p modes only.\r\n");
+                        }
+                if(in_chan == SERIAL)strout("   SERIAL");
+                else strout("   PARALLEL");
+                jputchar('\r',SERIAL);
+                jputchar('\n',SERIAL);
+                cha = ' ';
+                break;
+            case 'e':
+                reporterrors = intin(&cha);
+                break;
+            default:
+                strout("illegal directive\r\n");
+            }
+            i = -1;
+        }
+        else if ((i = findlex(ch1, cha)) != -1)  {
+            if (cha != ' ') adchar(&ch1, &cha);
+        }
+        else if (ch1 != ' ' && ch1 != '\r' && ch1 != '\n' && ch1 != '\04'
+                            && (i = findlex(ch1, ' ')) == -1) {
+            strout("\r\ncannot identify ");
+            jputchar(ch1,SERIAL);
+            jputchar(' ',SERIAL);
+            intout(ch1,SERIAL);
+            jputchar('\r',SERIAL);
+            jputchar('\n',SERIAL);
+        }
+        if (i != -1) {
+            pp = pp->fwdptr = allocit();
+            pp->content[0] = i;
+            switch (lexindex[i][pr][0]) {
+            case EOUTYP:
+                return (syntop);
+            case DURTYP:
+                pp->content[1] = intin(&cha);
+                break;
+            case PITTYP:
+                pp->content[1] = intin(&cha);
+                pp->content[2] = intin(&cha);
+            }
+        }
+    }
+}
+
+/*
+ * Finds the two-character string ch1, ch2 in array lex,
+ * returning the lexindex of the string
+ * (-1 if not found).
+ */
+int findlex(ch1, ch2)
+char ch1, ch2;
+{
+    int lexind;
+    char c;
+    for (lexind = 0; ; lexind++) {
+        if ((c = lex[lexind][0]) == '\0') return (-1);
+        if (c == ch1 && ch2 == lex[lexind][1]) return (lexind);
+    }
+}
+
+/*
+ * Advances the characters pointed to by cp1, cp2
+ * by reading from the standard input device.
+ */
+adchar(cp1, cp2)
+char *cp1, *cp2;
+{
+    *cp1 = *cp2;
+    *cp2 = chin(in_chan);
+}
+
+/*
+ * Allocate an element of the segment list,
+ * with its fwd ptr zeroed.
+ */
+struct listelt *allocit()
+{
+    struct listelt *t;
+    int i, prior;
+
+    prior = setprior(HIGH);
+    if (freep) {  /* get space from free list */
+        t = freep;
+        freep = freep->fwdptr;
+    }
+    else {
+        t = spacep++;  /* get space from pool */
+        if ((spacep =+ NCONTENT) >= space + SPACESIZ) {
+            setprior(prior);
+            abortit("cannot allocate list element");
+        }
+    }
+    t->fwdptr = 0;
+    for (i = 0; i < NCONTENT; i++)  t->content[i] = 0;
+    setprior(prior);
+    return (t);
+}
+
+/*
+ * Put an element on the free list.
+ * Returns old fwd ptr of freed element.
+ */
+struct listelt *freeit(p)
+struct listelt *p;
+{
+    struct listelt *q;
+    int prior;
+
+    prior = setprior(HIGH);
+    q = p->fwdptr;
+    p->fwdptr = freep;
+    freep = p;
+    setprior(prior);
+    return (q);
+}
+
+
+
+
+/*
+ * Prints the synthesis list in crude form,
+ */
+prsynlst(p)
+struct listelt *p;
+{
+    int i, j, end;
+    for (end=0; end != 1; p = freeit(p)) {
+                if ((i = p->content[0]) < MAXLEX && i >= 0) {
+                    jputchar(lex[i][0],PARALLEL);
+                    jputchar(lex[i][1],PARALLEL);
+                    if (lexindex[i][pr][0] == EOUTYP) end = 1;
+                }
+                else intout(i,PARALLEL);
+                for (i = NCONTENT; i > 1 && p->content[i-1] == 0; i--);
+                for (j = 1; j < i; j++)  {
+                    jputchar(' ',PARALLEL);
+                    intout(p->content[j],PARALLEL);
+                }
+                jputchar('\n',PARALLEL);
+    }
+}
+
+
+/*
+ * Prints the parameter tracks for synthesis of synthesizer i.
+ * Returns the state of the synthesizer.
+ * Call pparm(i) repeatedly while this state is non-zero
+ * to print all the parms for the utterance.
+ */
+pparm(i)
+int i;
+{
+    int j;
+
+    for (j=0; j < NPHYS; j++) {
+        intout(pd[i].parms[j],PARALLEL);
+        jputchar(' ',PARALLEL);
+    }
+    jputchar('\n',PARALLEL);
+    switch(i) {
+    case PATTYP:
+                if ((j = patparm()) == 0) jputchar('\n',PARALLEL);
+        else if (sd[PATTYP].sclock-pd[PATTYP].clock < ADVANCLOCK) seg(PATTYP);
+                return(j);
+
+    case ICLTYP:
+                if ((j = iclparm()) == 0)  jputchar('\n',PARALLEL);
+        else if (sd[ICLTYP].sclock-pd[ICLTYP].clock < ADVANCLOCK) seg(ICLTYP);
+                return(j);
+
+    case COMTYP:
+        if ((j = comparm()) == 0) jputchar('\n',PARALLEL);
+        else if (sd[COMTYP].sclock-pd[COMTYP].clock < ADVANCLOCK) seg(COMTYP);
+        return(j);
+
+    default:
+                abortit("pparm: does not cater for this synthesizer");
+    }
+}
+
+
+
+
+/*
+ * Reads a char from channel
+ * but passes over comments ("\[" to end of line)
+ */
+char chin(channel)
+int channel;
+{
+    char c;
+    if ((c = jgetchar(channel)) == '[')   while ((c = jgetchar(channel)) != '\n');
+    return(c=='\t' ?  ' ' : c);
+}
+
+/*
+ * Reads a signed integer from in_chan, returning 0 if one is not there.
+ * Call like  n = intin(&ch)  where ch is initialized as
+ * one character of forward context (it is updated by intin
+ * accordingly).
+ */
+int intin(cp)
+char *cp;
+{
+    int n, minus;
+
+    n = minus = 0;
+    while (*cp == ' ') *cp = chin(in_chan);
+    if (*cp == '-') {
+        minus++;
+        *cp = chin(in_chan);
+    }
+    while (*cp >= '0' && *cp <= '9') {
+        n = 10*n + *cp - '0';
+        *cp = chin(in_chan);
+    }
+    if (minus) n = -n;
+    return(n);
+}
+
+/*
+ * Reads a list of integers from in_chan, until '\n',
+ * and places them in *p++,
+ * returning number of integers read.
+ * Call-by-value means that the actual parameter p is not updated.
+ * Aborts if eof encountered on a line by itself.
+ * Stops reading on error (illegal character).
+ */
+intsin(p)
+int *p;
+{
+    int nints;
+    char c;
+    c = chin(in_chan);
+    for (nints = 0; ; nints++) {
+        while (c == ' ') c = chin(in_chan);
+        if (nints == 0 && c == '\0') abortit("eof encountered in 'intsin'");
+        if ((c < '0' || c > '9') && c != '-')  return(nints);
+        *p++ = intin(&c);
+    }
+}
+
+/*
+ * Prints character string, with no newline
+ */
+strout(p)
+char *p;
+{
+    while (*p != '\0') jputchar(*p++,SERIAL);
+}
+
+/*
+ * Prints message and aborts
+ */
+abortit(p)
+char *p;
+{
+    strout(p);
+    jputchar('\n',SERIAL);
+    jputchar('\r',SERIAL);
+    if(in_chan == PARALLEL)strout("Note: input is PARALLEL.");
+    else strout("Note: input is SERIAL.");
+    jputchar('\n',SERIAL);
+    jputchar('\r',SERIAL);
+    abort();
+}
+
+/*
+ * Prints signed integer in decimal on channel
+ */
+intout(n,channel)
+int n,channel;
+{
+    int flag, k, d;
+
+    if (n < 0) {
+        jputchar('-',channel);
+        n = -n;
+    }
+    flag = 0;
+    for (k = 10000; k; k = k/10) {
+        d = n/k;
+        n =% k;
+        if (d || flag) {
+            flag++;
+            jputchar('0' + d,channel);
+        }
+    }
+    if (flag == 0) jputchar('0',channel);
+}
+
+
+
+
+/*
+ * High-level rhythm assignment routine.
+ * Computes phoneme durations and transition times.
+ */
+rhythm(syntop)
+struct listelt *syntop;
+{
+    struct listelt *pfoot, *psyll;
+    int i, s, sfoot, smark;
+
+/* separate syllables and classify the clusters */
+    syllsplit(syntop);
+    for (pp = syntop; afind(CLUSTYP,NULLTYP,NULLTYP) == CLUSTYP; pp = psyll->fwdptr) {
+        psyll = lpp;  /* pp elt may have been deleted */
+        countclus();
+    }
+
+/* insert initial foot boundary if necessary */
+    pp = syntop;
+    s = 0;
+    if (afind(FOOTTYP,SYLLTYP,NULLTYP) == SYLLTYP) {
+        insert(0);
+        s = 1;
+    }
+    for (i = 0; i < nlexes; i++)
+/* find foot lexind and make sfoot equal to stressed foot lexind */
+        if (lexindex[i][pr][0] == FOOTTYP)  {
+            if (s == 1) pp->content[0] = i;
+            if (lexindex[i][pr][1] == 0) s = 0;
+            else sfoot = i;
+        }
+    smark = 0;  /* smark says whether a stressed foot has been seen in this tg */
+
+/* for each foot ... */
+    for (pp = syntop; afind(FOOTTYP,NULLTYP,NULLTYP) == FOOTTYP;
+                                                         pp = pfoot) {
+        pfoot = pp;
+        if (smark==0) smark = lexindex[pfoot->content[0]][pr][1];
+        if (afind(FOOTTYP,TGTYP,EOTGTYP) != FOOTTYP) {
+/* make last foot of tg stressed if appropriate */
+            if (smark==0) pfoot->content[0] = sfoot;
+            smark = 0;
+        pp = pfoot;
+/* make last foot of utt stressed (even if another one is stressed as well) */
+        if (afind(FOOTTYP,EOUTYP,NULLTYP) == EOUTYP)
+            pfoot->content[0] = sfoot;
+        pp = pfoot;
+/* . assign foot duration, ... */
+        if ((pfoot->content[1] = nextdur()) < 0)
+            pfoot->content[1] = lexindex[pfoot->content[0]][pr][2];
+/* . classify the syllables, ... */
+        classsyll(pfoot);
+/* . and compute their durations */
+        sylldurs(pfoot);
+
+/* for each syllable ... */
+        s = lexindex[pfoot->content[0]][pr][1];
+        for (pp = pfoot; afind(SYLLTYP,FOOTTYP,NULLTYP) == SYLLTYP;
+                                                                  pp = psyll) {
+            psyll = pp;
+/* . fix up explicitly specified syllable durations ... */
+            if ((i = nextdur()) >= 0) psyll->content[3] = i;
+/* . and compute the phoneme durations */
+            phdurs(psyll,s);
+        }
+    }
+
+/* put in initial and final silences */
+    for (i = 0; lexindex[i][pr][0] != PHTYP || (lexindex[i][pr][PHFLAGS]&BREATH)==0;
+                                                                          i++);
+    pp = syntop;
+    adpp();
+    insert(i);
+    pp->content[2] = SOUDUR;
+    while (pp->content[0] != EOUTYP) adpp();
+    insert(i);
+    pp->content[2] = EOUDUR;
+
+/* check the phoneme durations and compute transition times */
+    phdurcheck(syntop);
+}
+
+
+
+
+/*
+ * Syllabification routine.
+ * Looks for a minimum of sonority between two peaks, and if there
+ * is not a syllable boundary there already,
+ * puts one in at an appropriate place.
+ * The "appropriate place" is determined by the number of consonants
+ * which have the same, minimum, sonority:
+ * if there is only one, the boundary is placed before it;
+ * if there are two, the boundary is placed between them;
+ * if there are three or more, the boundary is placed after the
+ * first two.
+ * Always places a boundary directly before a phoneme
+ * (so as not to misplace any DURTYP elements).
+ * Also marks the start of the C1, NU, C2 parts of a syllable with
+ * a CLUSTYP element, if the appropriate part exists.
+ * Routine relies on an EOUTYP element being returned continually
+ * by adpp, at the end of the utterance.
+ */
+syllsplit(syntop)
+struct listelt *syntop;
+{
+    int i, j, c, son, sylllex, nph;
+    struct listelt *p, *q, *lp;
+
+/* set sylllex to index of syllable boundary lex */
+    for (sylllex = 0; lexindex[sylllex][pr][0] != SYLLTYP; sylllex++);
+
+/* pre-scan synlst to put syllable boundaries at word boundaries and */
+/* either side of ^'s */
+    pp = syntop;
+prescan:
+    switch (afind(PHTYP,WORDTYP,NULLTYP)) {
+    case PHTYP:
+        if ((lexindex[pp->content[0]][pr][PHFLAGS] & BREATH) == 0) goto prescan;
+        insert(sylllex);
+        adpp();
+    case WORDTYP:
+        if (afind(PHTYP,SYLLTYP,NULLTYP) == PHTYP) insert(sylllex);
+        goto prescan;
+    }
+
+    pp = syntop;
+    nph = 1;
+/* here on syllable boundary */
+syllb:
+    switch(find(PHTYP,SYLLTYP,NULLTYP)) {
+    default:
+    exit:
+/* remove redundant terminal syllable boundary */
+        if (nph == 0) lp->fwdptr = freeit(lp->fwdptr);
+        return;
+    case PHTYP:
+        insert(sylllex);  /* create syll boundary */
+    case SYLLTYP:
+        son = 0;
+        lp = lpp;
+        nph = 0;
+    }
+
+/* search for maximum sonority, filling in cluster elements */
+    i = 0;  /* set when it is determined that a C1 or NU cluster exists */
+smax:
+    switch(c = afind(PHTYP,SYLLTYP,NULLTYP)) {
+    case PHTYP:
+        nph++;
+        if ((j = updson(&son)) < 0) break;
+        if (i == 0) {
+            insert(CLUSTYP);  /* create C1CLUS elt */
+            pp->content[1] = C1CLUS;
+            i++;
+            p = lpp;
+            adpp();
+        }
+/* keep p pointing just before first segment with max son */
+        else if (j > 0) p = lpp;
+        goto smax;
+    case SYLLTYP:
+        lp = lpp;
+        nph = 0;
+        if (son == 0)  {
+            lpp->fwdptr = freeit(pp);
+            pp = lpp;
+            goto smax;
+        }
+        pp = lpp;
+    }
+    if (c == EOTGTYP && nph == 0) goto exit;
+/* create NU-type cluster element */
+    if ((p->fwdptr)->content[0] != CLUSTYP)  {
+        q = p->fwdptr;
+        p = p->fwdptr = allocit();
+        p->fwdptr = q;
+    }
+    else p = p->fwdptr;
+    p->content[0] = CLUSTYP;
+    p->content[1] = NUCLUS;
+    if (c == EOUTYP) goto exit;
+
+/* search for minimum sonority and mark appropriate place */
+    i = 0;  /* set when it is determined that a C2 cluster exists */
+newmin:
+    c = 1;
+    if (son == 0 && i == 0) {
+        insert(CLUSTYP);  /* create C2 cluster element */
+        pp->content[1] = C2CLUS;
+        i++;
+    }
+mark:
+    p = lpp;
+smin:
+    switch(afind(PHTYP,SYLLTYP,NULLTYP)) {
+    default:
+        goto exit;
+    case PHTYP:
+        nph++;
+        if ((j = updson(&son)) < 0) goto newmin;
+        if (j == 0) {
+            if (++c <= 3) goto mark;
+            goto smin;
+        }
+/* a definite minimum has been reached - make a syll boundary */
+        lpp = p;
+        pp = lpp->fwdptr;
+    case SYLLTYP:
+        goto syllb;
+    }
+}
+
+
+
+
+/*
+ * Counts the phoneme segments in a cluster and updates content[2]
+ * of the record.
+ */
+countclus()
+{
+    struct listelt *pclus, *lpclus;
+    int i;
+
+    pclus = pp;
+    lpclus = lpp;
+    for (i = 0; afind(PHTYP,CLUSTYP,SYLLTYP) == PHTYP; i++);
+    pclus->content[2] = i;
+    if (i == 0) lpclus->fwdptr = freeit(pclus);
+}
+
+
+
+/*
+ * Procedure to classify the syllable types in a foot,
+ * and fill in the syllable weights.
+ * Call with pfoot pointing to foot.
+ */
+classsyll(pfoot)
+struct listelt *pfoot;
+{
+    struct listelt *psyll;
+    int i, count, type, types;
+
+    pp = pfoot;
+    while ((i = afind(SYLLTYP,FOOTTYP,NULLTYP)) == FOOTTYP)
+        lpp->fwdptr = freeit(pp); /* no syll in foot - remove foot bdry */
+    if (i == EOUTYP) return;
+    psyll = pp;
+    psyll->content[1] = types = weaksyll();
+    psyll->content[2] = types==0 ? 200:100;  /* default syllable weight */
+    pp = psyll;
+    type = 2;
+    count = 1;
+    while ((i = afind(SYLLTYP,WORDTYP,FOOTTYP)) != EOUTYP && i != FOOTTYP) {
+        if (i == WORDTYP) type = 3;
+        else {
+            pp->content[1] = type;
+            pp->content[2] = 100;  /* default syllable weight */
+            types =| ((type == 2) << count++);
+/* types contains bits set for weak or enclitic syllables, */
+/* e.g.  110    <-->  <type=2> <type=2> <strong> */
+/*              <-->  <strong> <enclitic> <enclitic> */
+        }
+    }
+    pfoot->content[2] = count;
+    i = -1;
+    if (count == 2) switch(types) {
+    case 2:
+        i = 0;  /* <strong> <enclitic> */
+        break;
+    case 0:
+        i = 2;  /* <strong> <proclitic> */
+        break;
+    case 3:
+        i = 4;  /* <weak> <enclitic> */
+        break;
+    }
+    else if (count == 3) switch (types) {
+    case 6:
+        i = 6;  /* <strong> <enclitic> <enclitic> */
+        break;
+    case 2:
+        i = 9;  /* <strong> <enclitic> <proclitic> */
+        break;
+    case 0:
+        i = 12; /* <strong> <proclitic> <proclitic> */
+        break;
+    case 7:
+        i = 15; /* <weak> <enclitic> <enclitic> */
+        break;
+    case 3:
+        i = 18; /* <weak> <enclitic> <proclitic> */
+        break;
+    }
+
+/* overwrite syllable weights with numbers from syllmisc table */
+    if (i >= 0) for (pp = pfoot; afind(SYLLTYP,FOOTTYP,NULLTYP) == SYLLTYP;
+                                                pp->content[2] = syllmisc[i++]);
+}
+
+
+
+
+/*
+ * Calculate the syllable durations for the foot.
+ */
+sylldurs(pfoot)
+struct listelt *pfoot;
+{
+    int total, min, incr, dur, sylllex;
+
+    total = 0;
+    min = 1000;
+    dur = pfoot->content[1];
+    for (pp = pfoot; afind(SYLLTYP,FOOTTYP,NULLTYP) == SYLLTYP;
+                                        total =+ pp->content[2]) {
+        min = pp->content[2] < min ? pp->content[2] : min;
+        sylllex = pp->content[0];
+    }
+    if ((incr = lexindex[sylllex][pr][1] - (dur * min)/total) < 0) incr = 0;
+    for (pp = pfoot; afind(SYLLTYP,FOOTTYP,NULLTYP) == SYLLTYP;
+                    pp->content[3] = incr + (dur * pp->content[2])/total);
+}
+
+
+
+
+/*
+ * Calculate the segment durations for the syllable.
+ * (s is unmarked/marked status of the current foot.)
+ */
+/*
+ * INT and EXT must be defined as follows:
+ */
+#define INT 0
+#define EXT 1
+phdurs(psyll,s)
+struct listelt *psyll;
+int s;
+{
+    int sylldur, count, type, stop, dur, discrep, i, j, k,
+        number[2], offset[2], factor[2];
+    struct listelt *p;
+
+    s = (s!=0)<<3;
+    pp = psyll;
+    sylldur = pp->content[3];
+    afind(CLUSTYP,NULLTYP,NULLTYP);
+    if (pp->content[1] == C1CLUS)
+        while (afind(PHTYP,CLUSTYP,NULLTYP) == PHTYP) pp->content[4] = INT;
+    count = pp->content[2];
+    while ((type=afind(PHTYP,CLUSTYP,SYLLTYP)) == PHTYP) {
+        pp->content[4] = INT;
+        if (count>1 || (lexindex[pp->content[0]][pr][PHFLAGS]&LVOWEL)) {
+            pp->content[4] = EXT;
+            count = 0;
+        }
+    }
+    stop = 0;
+    if (type==CLUSTYP) {
+        while (afind(PHTYP,SYLLTYP,NULLTYP)==PHTYP) {
+            pp->content[4] = INT;
+            p = pp;
+            if (stop==0 && (lexindex[pp->content[0]][pr][PHFLAGS]&STOP)) {
+                pp->content[4] = EXT;
+                stop = 1;
+            }
+        }
+        if (stop==0) p->content[4] = EXT;
+    }
+    pp = psyll;
+    number[INT] = 0;  number[EXT] = 0;  dur = 0;
+    while (afind(PHTYP,SYLLTYP,NULLTYP)==PHTYP) {
+        number[pp->content[4]]++;
+        dur =+ (pp->content[2] = lexindex[pp->content[0]][pr][PHDUR]);
+    }
+    for (i=EXT; i>=0; i--) {
+        discrep = sylldur - dur;
+        j = (discrep + (number[i]>>1))/number[i];
+        k = s + (i<<2);
+        if (j < phmisc[k]) j = phmisc[k];
+        else if (j > phmisc[++k]) j = phmisc[k];
+        offset[i] = j;
+        dur =+ j*number[i];
+    }
+    discrep = (sylldur*100 + (dur>>1))/dur;
+    for (i=EXT; i>=0; i--) {
+        k = s + (i<<2) + 2;
+        j = discrep;
+        if (j < phmisc[k]) j = phmisc[k];
+        else if (j > phmisc[++k]) j = phmisc[k];
+        factor[i] = j;
+    }
+    pp = psyll;
+    while (afind(PHTYP,SYLLTYP,NULLTYP)==PHTYP) {
+        type = pp->content[4];
+        pp->content[2] = ((pp->content[2] + offset[type])*factor[type] + 50)/100;
+    }
+}
+
+
+
+
+/*
+ * Fixes up explicitly specified phoneme durations
+ * and computes transition times.
+ */
+phdurcheck(syntop)
+struct listelt *syntop;
+{
+    int dur, oldflag, newflag, tt, i, time;
+    struct listelt *p;
+
+    pp = syntop;
+    time = 0;
+    oldflag = -1;
+    while (afind(PHTYP,NULLTYP,NULLTYP) == PHTYP) {
+/* fix up explicitly specified phoneme durations */
+        if ((i = nextdur()) >= 0) pp->content[2] = i;
+
+/* compute transition time */
+        dur = pp->content[2];
+        newflag = lexindex[pp->content[0]][pr][PHFLAGS];
+        if (oldflag == -1) tt = SOUDUR - 1;
+        else  {
+            if (newflag & (STOP|NASAL)) i = 2;
+            else if (oldflag & (STOP|NASAL)) i = 4;
+            else if ((newflag & GLIDE) || ((oldflag & VOWEL) && (newflag & VOWEL))) {
+                if (dur < ttmisc[0]) dur = ttmisc[0];
+                tt = dur - ttmisc[1];
+                goto done;
+            }
+            else i = 6;
+            if (dur < ttmisc[i]) dur = ttmisc[i];
+            tt = ttmisc[++i];
+        }
+    done:
+        pp->content[1] = time;
+        time =+ pp->content[2] = dur;
+        pp->content[3] = tt;
+        oldflag = newflag;
+    }
+    pp->content[1] = time;
+}
+
+
+
+
+/*
+ * Decides whether a syll is weak (returns 1) or strong (returns 0).
+ * (^ sylls are weak.)
+ * Call with pp pointing to syll.
+ */
+int weaksyll()
+{
+    int i;
+    while (afind(CLUSTYP,NULLTYP,NULLTYP) == CLUSTYP && pp->content[1] != NUCLUS);
+    if (pp->content[2] > 1) return(0);
+    if (afind(PHTYP,CLUSTYP,NULLTYP)==PHTYP)
+        if (lexindex[pp->content[0]][pr][PHFLAGS]&LVOWEL) return(0);
+    if (find(CLUSTYP,SYLLTYP,NULLTYP)==CLUSTYP)
+        if (pp->content[2] >1) return(0);
+    return(1);
+}
+
+
+
+
+/*
+ * Updates the sonorance, returning the difference between the new and old values.
+ * Call like diff = updson(&son).
+ * Prosodic pointer pp is assumed to point to a phoneme.
+ */
+int updson(p)
+int *p;
+{
+    int son, flags;
+    son = *p;
+    flags = lexindex[pp->content[0]][pr][PHFLAGS];
+    *p = (flags & VOWEL) ? 2 : (flags & ( /* SONOR | */ BREATH)) ? 1 : 0;
+    return(*p - son);
+}
+
+
+
+
+#define TONIC 0
+#define PRETONIC 1
+
+/*
+ * Assigns intonation to each tone group
+ */
+pitch(syntop)
+struct listelt *syntop;
+{
+    struct listelt *pfoot;
+    int tglex, eotglex, feet, nfeet, i, *tgp;
+
+/* find null tg lexind */
+    for (tglex = 0; lexindex[tglex][pr][0] != TGTYP; tglex++);
+
+/* find null eotg lexind */
+    for (eotglex = 0; lexindex[eotglex][pr][0] != EOTGTYP; eotglex++);
+
+tgstart:
+    tgp = &lexindex[tglex][pr][1];
+    pp = syntop;
+    if ((i = afind(PHTYP,TGTYP,EOTGTYP)) == EOUTYP) return;
+    if (i == EOTGTYP) {
+        syntop = pp;
+        goto tgstart;
+    }
+    if (i == TGTYP) {
+        syntop = pp;
+        tgp = &lexindex[pp->content[0]][pr][1];
+    }
+    pp = syntop;
+    if ((i = afind(PITTYP,TGTYP,EOTGTYP)) == PITTYP) {
+        afind(TGTYP,EOTGTYP,NULLTYP);
+        syntop = lpp;
+        goto tgstart;
+    }
+    else if (i == TGTYP) insert(eotglex);
+    pp = syntop;
+
+/* count pre-tonic feet */
+    for (feet = 0; afind(FOOTTYP,TGTYP,EOTGTYP) == FOOTTYP &&
+        lexindex[pp->content[0]][pr][1] == 0;  feet++);
+    i = 0;
+    pp = syntop;
+    if (feet) {
+        if (tgp[0] && afind(FOOTTYP,PHTYP,NULLTYP) == FOOTTYP) {
+            afind(PHTYP,NULLTYP,NULLTYP);
+            insertpit(0, tgp[0]);
+            i = 1;
+        }
+        for ( ; i < feet; i++) {
+            afind(FOOTTYP,NULLTYP,NULLTYP);
+            pfoot = pp;
+            intone(pfoot, tgp[1] + (i*tgp[2] + (feet>>1))/feet, tgp[3], tgp[8],
+                                                                          PRETONIC);
+            pp = pfoot;
+        }
+/* find last phoneme in pre-tonic */
+        while (afind(PHTYP,FOOTTYP,NULLTYP) == PHTYP) syntop = pp;
+        pp = syntop;
+        insertpit(pp->content[2] - 1, tgp[1] + tgp[2]);
+    }
+    if (afind(FOOTTYP,TGTYP,EOTGTYP) != FOOTTYP) {
+        syntop = lpp;
+        goto tgstart;
+    }
+
+/* assign pitch to tonic foot */
+    i = tgp[1] + tgp[2] + tgp[4];
+    syntop = pp;
+    intone(pp, i, tgp[6], tgp[9], TONIC);
+    i =+ tgp[5];
+    while (afind(FOOTTYP,TGTYP,EOTGTYP) == FOOTTYP) syntop = pp;
+    pp = syntop;
+    if (tgp[7]) {
+        afind(PHTYP,NULLTYP,NULLTYP);
+        insertpit(0, i);
+        i = tgp[7];
+    }
+    while (afind(PHTYP,TGTYP,EOTGTYP) == PHTYP) syntop = pp;
+    pp = syntop;
+    insertpit(pp->content[2] - 1, i);
+    goto tgstart;
+}
+
+
+
+
+/*
+ * Assigns intonation to a pre-tonic foot or to the tonic foot.
+ * Puts pit at the start of the foot, and pit+pincr at
+ * percent of the way along it.
+ * type is TONIC or PRETONIC to determine whether pitmisc[0] should
+ * be used to limit the rate of change of pitch.
+ */
+intone(pfoot, pit, pincr, percent, type)
+struct listelt *pfoot;
+int pit, pincr, percent, type;
+{
+    int s, t, maxpincr;
+
+    pp = pfoot;
+    for (t = 0; afind(PHTYP,FOOTTYP,EOTGTYP) == PHTYP; t =+ pp->content[2]);
+    pp = pfoot;
+    afind(PHTYP,NULLTYP,NULLTYP);
+    insertpit(0, pit);
+    if ((s = (percent*t + 50)/100) <= 0 || s >= t) return;
+    if (type == PRETONIC)
+        if (pincr > (maxpincr=(10*s)/pitmisc[0])) pincr = maxpincr;
+        else if (pincr < -maxpincr) pincr = -maxpincr;
+    t = 0;
+    pp = lpp;
+    while(t + pp->content[2] <= s) {
+        t =+ pp->content[2];
+        afind(PHTYP,NULLTYP,NULLTYP);
+    }
+    insertpit(s - t, pit + pincr);
+}
+
+
+
+
+/*
+ * Inserts a pitlex after the current phoneme.
+ * Call with pp pointing to phoneme.
+ */
+insertpit(reltime, value)
+int reltime, value;
+{
+    int pitlex;
+
+/* find pitch marker lexind */
+    for (pitlex = 0; lexindex[pitlex][pr][0] != PITTYP; pitlex++);
+
+    adpp();
+    while (pp->content[0] == pitlex) adpp();
+    insert(pitlex);
+    pp->content[1] = reltime;
+    pp->content[2] = value;
+}
+
+
+
+
+/*
+ * Advances pp, keeping lpp up to date.
+ * Refuses to advance past end of list.
+ * Returns pp.
+ */
+struct listelt *adpp()
+{
+    lpp = pp;
+    if (pp) pp = pp->fwdptr;
+}
+
+
+/*
+
+ * Calls adpp() repeatedly (possibly not at all) until an element
+ * of type1, type2, type3, or EOUTYP, is encountered.
+ * Returns type of element.
+ */
+int find(type1, type2, type3)
+int type1, type2, type3;
+{
+    int i;
+    for ( ;; adpp()) {
+        if (pp == 0) return(EOUTYP);
+        if ((i = pp->content[0]) < MAXLEX) i = lexindex[i][pr][0];
+        if (i == type1 || i == type2 || i == type3 || i == EOUTYP) return(i);
+    }
+}
+
+
+/*
+ * Like find() but guarantees to advance pp at least once.
+ */
+int afind(type1, type2, type3)
+int type1, type2, type3;
+{
+    if (pp) adpp();
+    return(find(type1, type2, type3));
+}
+
+
+/*
+ * Checks to see if the next element in the synthesis list is a DURTYP
+ * one.
+ * If so, returns the duration and removes the element from the list.
+ * If not, returns -1.
+ * (Skips over PITTYP elements to avoid them obscuring a subsequent DURTYP.)
+ */
+int nextdur()
+{
+    struct listelt *p, *lp;
+    int i, j;
+
+    p = pp;
+    j = -1;
+next:
+    lp = p;
+    p = p->fwdptr;
+    if ((i = p->content[0]) < MAXLEX) {
+        if ((i = lexindex[i][pr][0]) == PITTYP) goto next;
+        else if (i == DURTYP) {
+            j = p->content[1];
+            lp->fwdptr = freeit(p);
+        }
+    }
+    return(j);
+}
+
+/*
+ * inserts an elt at the current point in the synthesis list,
+ * making it type 'type'.
+ * returns with pp pointing to newly-inserted elt.
+ */
+insert(type)
+int type;
+{
+    pp = allocit();
+    pp->fwdptr = lpp->fwdptr;
+    lpp->fwdptr = pp;
+    pp->content[0] = type;
+}
+
+
+
+
+/*
+ * Initializes current synthesizer to say the utterance in
+ * the synlist pointed to by p.
+ */
+seginit(p)
+struct listelt *p;
+{
+    int i, j, t, oldt;
+    struct listelt *lp, *s;
+
+/* wait for all synthesizers to become free */
+wait:
+    for (i = 0; i < NSYNS; i++) if (pd[i].state) goto wait;
+
+/* report any errors in last synthesis */
+    for (i = 0; i < NERRORS; i++)  if (pd[syntyp].error[i]) {
+        if (reporterrors) {
+            jputchar('\n',SERIAL);
+            intout(syntyp,SERIAL);
+        }
+        for (j = 0; j < NERRORS; j++) {
+            if (reporterrors) {
+                jputchar(' ',SERIAL);
+                intout(pd[syntyp].error[j],SERIAL);
+            }
+            pd[syntyp].error[j] = 0;
+        }
+        if (reporterrors) jputchar(' ',SERIAL);
+    }
+
+/* initialize synthesis data base */
+    pd[syntyp].parmp = sd[syntyp].lastp = p;
+    sd[syntyp].sclock = 0;
+    sd[syntyp].rules = pr;
+    sd[syntyp].this = 0;
+    for (s = p->fwdptr;
+    s && ((j = s->content[0]) >= MAXLEX || lexindex[j][pr][0] != PHTYP);
+        s = s->fwdptr);
+    sd[syntyp].next = s;
+    for (i = 0; i < NLOG; i++)
+        pd[syntyp].rates[0][i] = pd[syntyp].incrs[0][i] = 0;
+    pd[syntyp].asp = 0;
+    pd[syntyp].clock = -2;
+
+/* change PITTYP specifications into pitch TARGTYP events */
+/* SOU lex is turned into the initial pitch event */
+    lp = 0;
+    pp = p;
+    oldt = 0;
+    while ((i = afind(PHTYP,PITTYP,NULLTYP)) != EOUTYP) {
+        if (i == PHTYP) t = pp->content[1];
+        else {
+            p->content[0] = TARGTYP;
+            p->content[1] = oldt;
+            p->content[2] = 6;  /* pitch event */
+            p->content[3] = t + pp->content[1] - oldt;
+            p->content[4] = parmscale(syntyp,6,pp->content[2]);
+            oldt = t + pp->content[1];
+            lp = lpp;
+            p = pp;
+        }
+    }
+    if (lp) lp->fwdptr = freeit(p);
+
+/* start off synthesis */
+    while (seg(syntyp) == 0);
+}
+
+
+/*
+ * Synthesize some more for synthesizer i.
+ * Seg makes sure it isn't called re-entrantly, and returns
+ * zero if it hasn't been executed.
+ */
+int segflag 0;
+
+int seg(i)
+int i;
+{
+    if (segflag) return(0);
+    segflag = 1;
+    while (sd[i].next && sd[i].sclock - pd[i].clock < 2*ADVANCLOCK) advanceseg(i);
+    segflag = 0;
+    return(1);
+}
+
+
+/*
+ * Main routine to do the segmental synthesis
+ * for a phoneme, and make appropriate real-time queue
+ * entries in synthesis list.
+ */
+advanceseg(i)
+int i;
+{
+    struct listelt *s, *p;
+    int j, *pl, *pt, *pn, tt;
+
+/* update last, this, next elements of segdata structure */
+    sd[i].last = sd[i].this;
+    sd[i].this = sd[i].next;
+    for (s = sd[i].this->fwdptr;
+    s && ((j = s->content[0]) >= MAXLEX || lexindex[j][sd[i].rules][0] != PHTYP);
+        s = s->fwdptr);
+    sd[i].next = s;
+
+/* frig values in the rule table if             */
+/*     (a) this is last phoneme of utterance    */
+/*     (b) this is an ^ or an h                 */
+/*     (c) this is a glide (but not "r")        */
+    if (sd[i].last) pl = &lexindex[sd[i].last->content[0]][sd[i].rules][0];
+    else pl = 0;
+    pt = &lexindex[sd[i].this->content[0]][sd[i].rules][0];
+    if (s) pn = &lexindex[s->content[0]][sd[i].rules][0];
+    else pn = 0;
+    if (pn == 0) for (j = 0; j < 4; j++) pt[PHF1+j] = pl[PHF1+j];
+    else {
+        if (pt[PHFLAGS] & BREATH + H) for (j = 0; j < 4; j++) pt[PHF1+j] = pn[PHF1+j];
+        else if (pt[PHFLAGS] & F3X) pt[PHF3] = pn[PHF3];
+    }
+
+/* now queue the parameter target events for the transition */
+    tt = sd[i].this->content[3];
+    for (j = 0; j < NLOG-1; j++)
+        qsdevent(i, TARGTYP, j, tt, parmscale(i,j,pt[PHAV+j]));
+
+/* if this is voiced stop, put in amplitude event for zero if */
+/* phoneme either side is unvoiced */
+    if (pt[PHFLAGS] & STOP && pt[PHAV] && (pl[PHAV] == 0 || pn[PHAV] == 0))
+        qsdevent(i, TARGTYP, 0, tt, parmscale(i,0,0));
+
+/* if this is h, make it aspirated */
+    if (pt[PHFLAGS] & H) qsdevent(i, ASPTYP, -1, sd[i].this->content[2], -1);
+
+/* if last was stop ... */
+    if (pl && pl[PHFLAGS] & STOP) {
+/* . make fast amplitude transition ... */
+        qsdevent(i, TARGTYP, 0, 1, parmscale(i,0,pt[PHAV]));
+/* . provided this isn't a stop, make stop burst ... */
+        if ((pt[PHFLAGS] & STOP) == 0) {
+            qsdevent(i, INCRTYP, 1, 2, parmscale(i,1,stopmisc[0]));
+/* . and if last was unvoiced, aspirate it to extent indicated by its */
+/*   content[4]+1 (+1 because amplitude will be zero anyway for the */
+/*   current sample */
+            if (pl[PHAV] == 0) qsdevent(i, ASPTYP, -1,
+                                aspmisc[sd[i].last->content[4]] + 1, -1);
+        }
+    }
+
+/* update sclock */
+    if (sd[i].last) sd[i].sclock = sd[i].last->content[1];
+/* now remove all but real-time events from the queue up to this phoneme */
+    if ((p = sd[i].last) == 0) return;
+    while (p != sd[i].this)
+        if (p->content[0] >= 0) sd[i].lastp->fwdptr = p = freeit(p);
+        else {
+            sd[i].lastp = p;
+            p = p->fwdptr;
+        }
+    if (sd[i].next == 0) {
+        sd[i].lastp->fwdptr = freeit(p);
+        sd[i].lastp = 0;
+    }
+}
+
+
+/*
+ * Put an event in the synlist, taking the synlist pointer,
+ * the event time, and the rule index, from sd[i].
+ */
+qsdevent(i, type, j, timeincr, value)
+int i, type, j, timeincr, value;
+{
+    qevent(sd[i].this, sd[i].this->content[1], sd[i].rules, type, j, timeincr, value);
+}
+
+
+/*
+ * Put an event in the synlist.
+ * Starts searching list from p.
+ * Queues events after existing cotemporaneous ones,
+ * so that events queued later take precedence.
+ */
+qevent(p, time, rules, type, i, timeincr, value)
+struct listelt *p;
+int time, rules, type, i, timeincr, value;
+{
+    struct listelt *lp;
+    int j;
+
+    for (ever) {
+        lp = p;
+        p = p->fwdptr;
+        if (((j = p->content[0]) < 0 ||
+            (j < MAXLEX && ((j = lexindex[j][rules][0]) == PHTYP || j == EOUTYP)))
+            && p->content[1] > time)  {
+            p = allocit();
+            p->fwdptr = lp->fwdptr;
+            p->content[0] = type;
+            p->content[1] = time;
+            p->content[2] = i;
+            p->content[3] = timeincr;
+            p->content[4] = value;
+            lp->fwdptr = p;
+            return;
+        }
+    }
+}
+
+
+/*
+ * Scale parameter i, value x, for synthesizer synty
+ * (including shift to make scaled value significant enough for
+ * rate calculations).
+ */
+parmscale(synty, i, x)
+int synty, i, x;
+{
+    if (synty == PATTYP) return(patscale(i,x) << 6);
+    if (synty == ICLTYP) return(iclscale(i,x) << 5);
+    if (synty == COMTYP) return(comscale(i,x) << 6);
+    abortit("parmscale: illegal synthesizer type");
+}
+
+
+
+#define NLOGS 256
+int logtable[NLOGS] {
+/*  logtable(i) = 2^13 log(i/32 + 1)  */
+          0,    364,    716,   1059,   1392,   1716,   2031,   2338,
+       2637,   2929,   3214,   3492,   3764,   4029,   4289,   4543,
+       4792,   5036,   5274,   5509,   5738,   5963,   6184,   6401,
+       6614,   6823,   7029,   7231,   7429,   7625,   7817,   8006,
+       8192,   8375,   8556,   8733,   8908,   9081,   9251,   9419,
+       9584,   9747,   9908,  10066,  10223,  10378,  10530,  10681,
+      10829,  10976,  11121,  11264,  11406,  11546,  11684,  11821,
+      11956,  12089,  12221,  12352,  12481,  12609,  12735,  12860,
+      12984,  13106,  13228,  13348,  13466,  13584,  13701,  13816,
+      13930,  14043,  14155,  14266,  14376,  14485,  14593,  14700,
+      14806,  14911,  15015,  15118,  15221,  15322,  15423,  15522,
+      15621,  15719,  15817,  15913,  16009,  16104,  16198,  16291,
+      16384,  16476,  16567,  16658,  16748,  16837,  16925,  17013,
+      17100,  17187,  17273,  17358,  17443,  17527,  17611,  17694,
+      17776,  17858,  17939,  18020,  18100,  18179,  18258,  18337,
+      18415,  18493,  18570,  18646,  18722,  18798,  18873,  18947,
+      19021,  19095,  19168,  19241,  19313,  19385,  19456,  19527,
+      19598,  19668,  19738,  19807,  19876,  19944,  20013,  20080,
+      20148,  20215,  20281,  20347,  20413,  20479,  20544,  20609,
+      20673,  20737,  20801,  20864,  20927,  20990,  21052,  21114,
+      21176,  21237,  21298,  21359,  21420,  21480,  21540,  21599,
+      21658,  21717,  21776,  21834,  21893,  21950,  22008,  22065,
+      22122,  22179,  22235,  22291,  22347,  22403,  22458,  22513,
+      22568,  22623,  22677,  22731,  22785,  22838,  22892,  22945,
+      22998,  23050,  23103,  23155,  23207,  23259,  23310,  23362,
+      23413,  23463,  23514,  23564,  23615,  23665,  23714,  23764,
+      23813,  23862,  23911,  23960,  24009,  24057,  24105,  24153,
+      24201,  24248,  24296,  24343,  24390,  24437,  24483,  24530,
+      24576,  24622,  24668,  24714,  24759,  24805,  24850,  24895,
+      24940,  24984,  25029,  25073,  25117,  25161,  25205,  25249,
+      25292,  25336,  25379,  25422,  25465,  25508,  25550,  25593,
+      25635,  25677,  25719,  25761,  25803,  25844,  25886,  25927};
+/*
+ * Logscale returns an n-bit number corresponding to parameter value x
+ * logarithmically scaled.
+ * Returns  (2^n * log(x/lim0) / log(lim1/lim0).
+ * synty is the synthesizer type, for recording out-of-range errors.
+ */
+int logscale(x, lim0, lim1, n, synty)
+int x, lim0, lim1, n, synty;
+{
+    int low, high, i, d, max;
+
+    max = (1<<n) -1;
+    if (lim0 < lim1)    {  low = lim0;    high = lim1;  }
+    else                {  low = lim1;    high = lim0;  }
+    if (x < low || x >= high) {
+        pd[synty].error[4]++;
+        if (x < low) x = low;
+        else x = high-1;
+    }
+    if ((i = scalediv(high,5,low) - 32) > NLOGS-1) abortit("log table not big enough");
+    d = scalediv(logtable[scalediv(x,5,low)-32], n, logtable[i]);
+    if (d > max) {
+        pd[synty].error[4]++;
+        d = max;
+    }
+    if (lim0 < lim1) return(d);   else return(max - d);
+}
+
+/*
+ * scalediv computes (a * 2^n)/b as an integer, to maximum precision.
+ */
+int ldivr;  /* holds the remainder after ldiv */
+int scalediv(a, n, b)
+int a, n, b;
+{
+    register int i;
+    i = ldiv(a >> 16-n, a << n, b);
+    return(i + (ldivr > (b>>1)));
+}
+
+
+
+/*
+ * PAT calibration data
+ *
+ *        A linear scaling is applied to all parameters except f0.
+ *        The array patcal[] gives the minimum value and the
+ *        maximum value, for each parameter.
+ */
+int patcal[7][2] {
+       0,   64,     /*  av  */
+       0,   64,     /*  as  */
+     100, 1050,     /*  f1  */
+     500, 2500,     /*  f2  */
+    1550, 3500,     /*  f3  */
+    2000, 7000,     /*  fn  */
+      33,  203};     /*  f0 */
+int aspfactor 2;  /* divide av by this to get ah1 */
+
+
+/*
+ * PAT handler.
+ * Enter on PAT interrupt.
+ */
+int patpending 0;     /* incremented whenever an interrupt occurs during output
+                         to PAT or during patparm; in which case the interrupt is
+                         held pending completion of patparm    */
+pat()
+{
+    register int i, j;
+
+/* check for illegal state */
+    if ((i=pd[PATTYP].state) <= 0 || i > 4) abortit("pat: illegal PAT interrupt");
+/* ignore the very first interrupt  */
+    if(pd[PATTYP].clock <-1) {
+        pd[PATTYP].clock++;
+        return;
+    }
+/* check for re-entrancy */
+    if (i == 2 || i == 4) if (patpending++) pd[PATTYP].error[0]++;  else;
+    else {
+        pd[PATTYP].state++;
+        patpending++;
+        while (patpending) {
+            patpending = 0;
+            mtps(PLOW);  /* make interruptable */
+/* output pd[PATTYP].parms[] to PAT */
+            j = 1<<8;
+            for (i=0; i<NPHYS; i++) {
+                PATADDR->writebuf = pd[PATTYP].parms[i] | j;
+                j =<< 1;
+            }
+/* get next lot of parameters ready */
+            i = patparm();
+            mtps(PHIGH);
+        }
+        if (i) {
+/* exit to seg if necessary */
+            if (pd[PATTYP].state == 2 &&
+                 sd[PATTYP].sclock-pd[PATTYP].clock < ADVANCLOCK) {
+                pd[PATTYP].state++;
+                mtps(PLOW);
+                seg(PATTYP);
+                mtps(PHIGH);
+                pd[PATTYP].state--;
+            }
+            pd[PATTYP].state--;
+        }
+        else {
+            PATADDR->csr =& ~INTRUPTA;
+            pd[PATTYP].state = 0;
+            patpending=0;
+        }
+    }
+}
+
+
+/*
+ * Prepare next lot of parameters for PAT,
+ * and see to any current events in the synthesis list.
+ * Returns 0 if the end of the synthesis list is encountered; otherwise returns 1.
+ */
+patparm()
+{
+    register int i, t, x;
+    int e;
+
+    pd[PATTYP].clock++;
+/* update current logical parameter values */
+    for (i = 0; i < NLOG; i++) {
+        pd[PATTYP].values[i] =+ pd[PATTYP].rates[0][i];
+        if (--pd[PATTYP].rates[1][i] == 0) pd[PATTYP].rates[0][i] = 0;
+    }
+
+/* dequeue any events, and deal with them */
+    for (ever) {
+        if (pd[PATTYP].parmp == sd[PATTYP].lastp) {
+            pd[PATTYP].error[2]++;
+            break;
+        }
+        if ((x = pd[PATTYP].parmp->content[1] - pd[PATTYP].clock) > 0) break;
+        if ((e = pd[PATTYP].parmp->content[0]) == EOUTYP) {
+            freeit(pd[PATTYP].parmp);
+            return(0);
+        }
+        if (x < 0) {
+            pd[PATTYP].error[1]++;
+            pd[PATTYP].clock = pd[PATTYP].parmp->content[1];
+        }
+        if ((t = pd[PATTYP].parmp->content[3]) <= 0) {
+            pd[PATTYP].error[3]++;
+abortit("error 3 in pat.c");
+            pd[PATTYP].parmp->content[3] = 1; /* set it to a safe value */
+        }
+        else if (e == ASPTYP) pd[PATTYP].asp = t;
+        else {
+            i = pd[PATTYP].parmp->content[2];
+            x = pd[PATTYP].parmp->content[4];
+            if (e == TARGTYP) {
+                pd[PATTYP].rates[0][i] = (x - pd[PATTYP].values[i] + (t >> 1))/t;
+                pd[PATTYP].rates[1][i] = t;
+            }
+            else {
+                pd[PATTYP].incrs[0][i] = x;
+                pd[PATTYP].incrs[1][i] = t;
+            }
+        }
+        pd[PATTYP].parmp = freeit(pd[PATTYP].parmp);
+    }
+
+/* compute current parameter values */
+    for (i = 0; i < NLOG; i++) {
+        pd[PATTYP].parms[i] = patlimit(pd[PATTYP].values[i]
+                                + pd[PATTYP].incrs[0][i] + 32 >> 6);
+        if (-- pd[PATTYP].incrs[1][i] == 0) pd[PATTYP].incrs[0][i] = 0;
+    }
+
+/* shuffle parameter values for PAT */
+    x = pd[PATTYP].parms[6];
+    pd[PATTYP].parms[6] = pd[PATTYP].parms[5];
+    pd[PATTYP].parms[5] = pd[PATTYP].parms[1];
+    i = pd[PATTYP].parms[0];
+    pd[PATTYP].parms[0] = x;
+    if (pd[PATTYP].asp) {
+        pd[PATTYP].asp--;
+        pd[PATTYP].parms[1] = 0;
+        pd[PATTYP].parms[7] = patlimit(i/aspfactor);
+    }
+    else {
+        pd[PATTYP].parms[1] = i;
+        pd[PATTYP].parms[7] = 0;
+    }
+
+    return(1);
+}
+
+
+/*
+ * Scale parameter number i, value x, into a 6-bit quantity
+ * according to patcal[][].
+ */
+int patscale(i, x)
+int i, x;
+{
+    if (i == 6)  return(logscale(x, patcal[6][0], patcal[6][1], 6, PATTYP));
+
+    if (patcal[i][0] == 0 && patcal[i][1] == 64) return(x);
+
+    return(patlimit(scalediv(x-patcal[i][0], 6, patcal[i][1]-patcal[i][0])));
+}
+
+
+/*
+ * Limit argument to range [0,63].
+ */
+int patlimit(x)
+int x;
+{
+    if (x < 0) {
+        pd[PATTYP].error[4]++;
+        return(0);
+    }
+    if (x > 63) {
+                pd[PATTYP].error[4]++;
+                return(63);
+        }
+        return(x);
+}
+
+
+
+/*
+ * ICL physical parameters are
+ *      F0
+ *      F1
+ *      F2
+ *      A2
+ *      F3
+ *      A3
+ *      A1
+ *      DS
+ */
+
+
+/*
+ * ICL handler.
+ * Enter on ICL interrupt.
+ */
+int iclpending 0;       /* incremented whenever an interrupt occurs during output
+                           to ICL or during iclparm; in which case the interrupt
+                           is held pending completion of iclparm */
+icl()
+{
+        register int i;
+
+/* temporary frig so that COMPUTALKER can share ICL's DRV-11 */
+        if (pd[ICLTYP].state == 0) {
+                computalker();
+                return;
+        }
+/* check for illegal state */
+        if ((i=pd[ICLTYP].state) <= 0 || i > 4) abortit("icl: illegal ICL interrupt");
+/*  ignore the very first interrupt  */
+        if(pd[ICLTYP].clock <-1) {
+                pd[ICLTYP].clock++;
+                return;
+        }
+/* check for re-entrancy */
+        if (i == 2 || i == 4) if (iclpending++) pd[ICLTYP].error[0]++;  else;
+        else {
+                pd[ICLTYP].state++;
+                iclpending++;
+                while (iclpending) {
+                        iclpending = 0;
+                        mtps(PLOW);  /* make interruptable */
+/* output pd[ICLTYP].parms[] to ICL */
+                        ICLADDR->writebuf = pd[ICLTYP].parms[0];  /* F0 */
+                        ICLADDR->writebuf = pd[ICLTYP].parms[1];  /* F1 */
+                        ICLADDR->writebuf = pd[ICLTYP].parms[2]+(pd[ICLTYP].parms[3]<<8);/* A2-F2 */
+                        ICLADDR->writebuf = pd[ICLTYP].parms[4]+(pd[ICLTYP].parms[5]<<8);/* A3-F3 */
+/* a m p l i t u d e   b i t s   a r e   i n v e r t e d */
+                        ICLADDR->writebuf = ((~pd[ICLTYP].parms[6])&0777) +
+                                                (pd[ICLTYP].parms[7]<<10);  /* DS-A1 */
+/* get next lot of parameters ready */
+                        i = iclparm();
+                        mtps(PHIGH);
+                }
+                if (i) {
+/* exit to seg if necessary */
+                        if (pd[ICLTYP].state=2 && sd[ICLTYP].sclock-pd[ICLTYP].clock<ADVANCLOCK){
+                                pd[ICLTYP].state++;
+                                mtps(PLOW);
+                                seg(ICLTYP);
+                                mtps(PHIGH);
+                                pd[ICLTYP].state--;
+                        }
+                        pd[ICLTYP].state--;
+                }
+                else {
+                        ICLADDR->csr =& ~INTRUPTA;
+                        pd[ICLTYP].state = 0;
+                        iclpending = 0;
+                }
+        }
+}
+
+
+/*
+ * Prepare next lot of parameters for ICL,
+ * and see to any current events in the synthesis list.
+ * Returns 0 if the end of the synthesis list is encountered, otherwise returns 1.
+ */
+iclparm()
+{
+        register int i, t, x;
+        int iclp[NLOG];
+        int e, j, y;
+
+        pd[ICLTYP].clock++;
+/* update current logical parameter values */
+        for (i = 0; i < NLOG; i++) {
+                pd[ICLTYP].values[i] =+ pd[ICLTYP].rates[0][i];
+                if (--pd[ICLTYP].rates[1][i] == 0) pd[ICLTYP].rates[0][i] = 0;
+        }
+
+/* dequeue any events, and deal with them */
+        for (ever) {
+                if (pd[ICLTYP].parmp == sd[ICLTYP].lastp) {
+                        pd[ICLTYP].error[2]++;
+                        break;
+                }
+                if ((x = pd[ICLTYP].parmp->content[1] - pd[ICLTYP].clock) > 0) break;
+                if ((e = pd[ICLTYP].parmp->content[0]) == EOUTYP) {
+                        freeit(pd[ICLTYP].parmp);
+                        return(0);
+                }
+                if (x < 0) {
+                        pd[ICLTYP].error[1]++;
+                        pd[ICLTYP].clock = pd[ICLTYP].parmp->content[1];
+                }
+                else if ((t = pd[ICLTYP].parmp->content[3]) <= 0) {
+                        pd[ICLTYP].error[3]++;
+                        pd[ICLTYP].parmp->content[3] = 1; /* set to good value */
+                }
+                else if (e == ASPTYP) pd[ICLTYP].asp = t;
+                else {
+                        i = pd[ICLTYP].parmp->content[2];
+                        x = pd[ICLTYP].parmp->content[4];
+                        if (e == TARGTYP) {
+                                pd[ICLTYP].rates[0][i] = (x - pd[ICLTYP].values[i] + (t >> 1))/t;
+                                pd[ICLTYP].rates[1][i] = t;
+                        }
+                        else {
+                                pd[ICLTYP].incrs[0][i] = x;
+                                pd[ICLTYP].incrs[1][i] = t;
+                        }
+                }
+                pd[ICLTYP].parmp = freeit(pd[ICLTYP].parmp);
+        }
+
+/* compute current parameter values */
+        for (i = 0; i < NLOG; i++) {
+                iclp[i] = (pd[ICLTYP].values[i] + pd[ICLTYP].incrs[0][i]) >> 5;
+                if (-- pd[ICLTYP].incrs[1][i] == 0) pd[ICLTYP].incrs[0][i] = 0;
+        }
+
+/* re-organize parameter values for ICL */
+        pd[ICLTYP].parms[6] = iclp[0];    /* A1 */
+        pd[ICLTYP].parms[0] = iclp[6];    /* F0 */
+        pd[ICLTYP].parms[1] = iclp[2];    /* F1 */
+        pd[ICLTYP].parms[2] = iclp[3];    /* F2 */
+        i = ((iclp[3] + (iclp[2]>>1))/iclp[2]) << 2;
+        for (j = 0; i =>> 1; j++);
+        pd[ICLTYP].parms[3] = j;   /* A2 */
+        if (pd[ICLTYP].asp) {
+                pd[ICLTYP].asp--;
+                pd[ICLTYP].parms[4] = 3;   /* sound type */
+                pd[ICLTYP].parms[5] = iclfric[0];    /* fricative amplitude */
+                pd[ICLTYP].parms[7] = 3;   /* D-S */
+        }
+        else if (iclp[1] == 0) {
+                pd[ICLTYP].parms[4] = iclp[4];    /* F3 */
+                i = ((iclp[4] + (iclp[3]>>1))/iclp[3]);
+                for ( ; i =>> 1; j++);
+                pd[ICLTYP].parms[5] = j;    /* A3 */
+                pd[ICLTYP].parms[7] = 0;    /* D-S */
+        }
+        else {
+                if (iclp[0]) {
+                        i = (iclp[0] << iclfric[1])/iclp[1];
+                        for (j = 0; i =>> 1; j++);
+                        pd[ICLTYP].parms[5] = j;   /* fricative amplitude */
+                        pd[ICLTYP].parms[7] = 1;   /* D-S */
+                }
+                else {
+                        pd[ICLTYP].parms[5] = iclfric[0];    /* fricative amplitude */
+                        pd[ICLTYP].parms[6] = iclp[1];    /* A1 */
+                        pd[ICLTYP].parms[7] = 3;   /* D-S */
+                }
+                x = iclp[5]<<4;
+                j = 10000;
+                for (i = 0; i < 5; i++) {
+                        y = iclmisc[i] - x;
+                        if (y < 0) y = -y;
+                        if (y < j) {
+                                pd[ICLTYP].parms[4] = i;   /* sound type */
+                                j = y;
+                        }
+                }
+        }
+        return(1);
+}
+
+
+/*
+ * Scale logical parameter number i, value x, into a 9-bit quantity.
+ */
+int iclscale(i, x)
+int i, x;
+{
+        register int y, z;
+
+        switch (i) {
+        case 0:
+        case 1:
+                return(x<<3);
+        case 2:
+        case 3:
+        case 4:
+                return(scalediv(x, 8, 10000));
+        case 5:
+                return(x>>4);
+        case 6:
+                return((10000 + (x>>1))/x);
+        }
+}
+
+
+
+/*
+ * Limit logical parameter number i, value x, into appropriate range.
+ */
+icllimit(i, x)
+int i, x;
+{
+        if (x < 0) {
+                pd[ICLTYP].error[4]++;
+                return(0);
+        }
+        switch (i) {
+        case 0:
+        case 1:
+        case 5:
+                if (x > 0777) {
+                        pd[ICLTYP].error[4]++;
+                        return(0777);
+                }
+                return(x);
+        case 2:
+        case 3:
+        case 4:
+        case 6:
+                if (x > 0377) {
+                        pd[ICLTYP].error[4]++;
+                        return(0377);
+                }
+                return(x);
+        }
+}
+
+
+
+/*
+ * COMPUTALKER calibration data
+ *
+ *      The array comcal[] gives the minimum value and the
+ *      maximum value, for each parameter.
+ */
+int comcal[7][2] {
+          0,  256,      /*  av  */
+          0,  384,      /*  as  */
+       1450,  170,      /*  f1  */
+       4400, 520,      /*  f2  */
+       5500, 1700,      /*  f3  */
+      14000, 1700,      /*  fh  */
+         74,  470};      /*  f0 */
+
+/*
+ * COMPUTALKER handler.
+ * Enter on COMPUTALKER interrupt.
+ */
+int compending 0;       /* incremented whenever an interrupt occurs during output
+                           to COMPUTALKER or during comparm; in which case the interrupt is
+                           held pending completion of comparm     */
+computalker()
+{
+        register int i, j;
+
+/* check for illegal state */
+        if ((i=pd[COMTYP].state) <= 0 || i > 4) abortit("com: illegal COM interrupt");
+/* ignore the very first interrupt  */
+        if(pd[COMTYP].clock <-1) {
+                pd[COMTYP].clock++;
+                return;
+        }
+/* check for re-entrancy */
+        if (i == 2 || i == 4) if (compending++) pd[COMTYP].error[0]++;  else;
+        else {
+                pd[COMTYP].state++;
+                compending++;
+                while (compending) {
+                        compending = 0;
+                        mtps(PLOW);  /* make interruptable */
+/* output pd[COMTYP].parms[] to COMPUTALKER */
+                        j = 0;
+                        for (i=0; i<NPHYS; i++) {
+                                COMADDR->writebuf = pd[COMTYP].parms[i] | j;
+                                j =+ (1<<8);
+                        }
+/* get next lot of parameters ready */
+                        i = comparm();
+                        mtps(PHIGH);
+                }
+                if (i) {
+/* exit to seg if necessary */
+                        if (pd[COMTYP].state == 2 && sd[COMTYP].sclock-pd[COMTYP].clock < ADVANCLOCK)
+                                pd[COMTYP].state++;
+                                mtps(PLOW);
+                                seg(COMTYP);
+                                mtps(PHIGH);
+                                pd[COMTYP].state--;
+                        }
+                        pd[COMTYP].state--;
+                }
+                else {
+                        COMADDR->csr =& ~INTRUPTA;
+                        COMADDR->writebuf = 15*(1<<8) + 0;  /* shut up COMPUTALKER */
+                        pd[COMTYP].state = 0;
+                        compending=0;
+                }
+        }
+}
+
+
+/*
+ * Prepare next lot of parameters for COMPUTALKER,
+ * and see to any current events in the synthesis list.
+ * Returns 0 if the end of the synthesis list is encountered; otherwise returns 1.
+ */
+comparm()
+{
+        register int i, t, x;
+        int e;
+
+        pd[COMTYP].clock++;
+/* update current logical parameter values */
+        for (i = 0; i < NLOG; i++) {
+                pd[COMTYP].values[i] =+ pd[COMTYP].rates[0][i];
+                if (--pd[COMTYP].rates[1][i] == 0) pd[COMTYP].rates[0][i] = 0;
+        }
+
+/* dequeue any events, and deal with them */
+        for (ever) {
+                if (pd[COMTYP].parmp == sd[COMTYP].lastp) {
+                        pd[COMTYP].error[2]++;
+                        break;
+                }
+                if ((x = pd[COMTYP].parmp->content[1] - pd[COMTYP].clock) > 0) break;
+                if ((e = pd[COMTYP].parmp->content[0]) == EOUTYP) {
+                        freeit(pd[COMTYP].parmp);
+                        return(0);
+                }
+                if (x < 0) {
+                        pd[COMTYP].error[1]++;
+                        pd[COMTYP].clock = pd[COMTYP].parmp->content[1];
+                }
+                if ((t = pd[COMTYP].parmp->content[3]) <= 0) {
+                        pd[COMTYP].error[3]++;
+                        pd[COMTYP].parmp->content[3] = 1; /* set it to a safe value */
+                }
+                else if (e == ASPTYP) pd[COMTYP].asp = t;
+                else {
+                        i = pd[COMTYP].parmp->content[2];
+                        x = pd[COMTYP].parmp->content[4];
+                        if (e == TARGTYP) {
+                                pd[COMTYP].rates[0][i] = (x - pd[COMTYP].values[i] + (t >> 1))/t;
+                                pd[COMTYP].rates[1][i] = t;
+                        }
+                        else {
+                                pd[COMTYP].incrs[0][i] = x;
+                                pd[COMTYP].incrs[1][i] = t;
+                        }
+                }
+                pd[COMTYP].parmp = freeit(pd[COMTYP].parmp);
+        }
+
+/* compute current parameter values */
+        for (i = 0; i < NLOG; i++) {
+                pd[COMTYP].parms[i] = comlimit(pd[COMTYP].values[i]
+                                        + pd[COMTYP].incrs[0][i] + 32 >> 6);
+                if (-- pd[COMTYP].incrs[1][i] == 0) pd[COMTYP].incrs[0][i] = 0;
+        }
+
+/* shuffle parameter values for COMPUTALKER */
+        x = pd[COMTYP].parms[6];
+        pd[COMTYP].parms[6] = pd[COMTYP].parms[1];
+        pd[COMTYP].parms[1] = x;
+        pd[COMTYP].parms[7] = pd[COMTYP].parms[5];
+        if (pd[COMTYP].asp) {
+                pd[COMTYP].asp--;
+                pd[COMTYP].parms[5] = comlimit(pd[COMTYP].parms[0]);
+                pd[COMTYP].parms[0] = 0;
+        }
+        else pd[COMTYP].parms[5] = 0;
+
+        return(1);
+}
+
+
+/*
+ * Scale parameter number i, value x, into a 8-bit quantity
+ * according to comcal[][].
+ */
+int comscale(i, x)
+int i, x;
+{
+        if (2 <= i && i <= 6)  return(logscale(x, comcal[i][0], comcal[i][1], 8, COMTYP));
+
+        if (comcal[i][0] == 0 && comcal[i][1] == 256) return(x<<2);
+
+        return(comlimit(scalediv(x-comcal[i][0], 8, comcal[i][1]-comcal[i][0])));
+}
+
+
+/*
+ * Limit argument to range [0,255].
+ */
+int comlimit(x)
+int x;
+{
+        if (x < 0) {
+                pd[COMTYP].error[4]++;
+                return(0);
+        }
+        if (x > 255) {
+                pd[COMTYP].error[4]++;
+                return(255);
+        }
+        return(x);
+}
+
+
+
+#define PARALLEL 0
+#define SERIAL 1
+#define DRADDR  0167770
+#define CONSADD 0177560
+#define RQA     0200
+#define RQB     0100000
+#define RQAEN   0100
+#define RQBEN   0040
+#define READY   0200
+#define CSR0    01
+#define CSR1    02
+
+struct drv11 {
+        int parcsr;
+        int parobuf;
+        int paribuf;
+};
+struct dlv11 {
+        int sericsr;
+        int seribuf;
+        int serocsr;
+        int serobuf;
+};
+
+char    *wrong[]{
+        "bus error",
+        "illegal instruction",
+        "breakpoint",
+        "IOT trap",
+        "powerfail",
+        "EMT instruction",
+        "trap instruction",
+        "console input",
+        "console output",
+        "DR-(70) rqa",
+        "DR-(70) rqb",
+        "DR-(60) rqa",
+        "DR-(60) rqb",
+        "DR-(50) rqa",
+        "DR-(50) rqb",
+};
+
+
+/*      This routine is called from the interrupt level on all TRAPS
+        r0 and r1 are saved (cos C doesn't) so that a return could be
+        made to the trapped program if that is sensible.
+        nps  - is the new status (from the vector)
+        type - is the type of trap that occurred (from 4 lsbits of nps)
+*/
+
+trap(type,r1,nps,r0,pc,ps)
+int     type,r1,nps,r0,pc,ps;
+{
+        abortit(wrong[type]);
+}
+
+
+
+char jgetchar(channel)
+int channel;
+{
+register int *addr;
+char c;
+        if(channel == PARALLEL) return(getdr(0));
+        addr = CONSADD;
+        while ((addr->sericsr & READY) == 0);
+        c = addr->seribuf &0177;
+        if((c >= 'A') && (c <= 'Z')) c =& 0137;
+        jputchar(c,SERIAL);
+        return(c);
+}
+
+jputchar(c,channel)
+char c;
+int channel;
+{
+register int *addr;
+int     i;
+        if(channel == PARALLEL){
+                putdr(c,0);
+                return;
+                }
+        addr = CONSADD;
+        while ((addr->serocsr & READY) == 0);
+        addr->serobuf = c & 0377;
+}
+
+
+
+char getdr(dev)
+int dev;
+{
+register int *addr;
+        addr = DRADDR-(dev<<3);
+        while ((addr->parcsr & RQB) == 0);
+        return(addr->paribuf & 0377);
+}
+
+putdr(w,dev)
+int dev;
+char w;
+{
+register int *addr;
+        addr = DRADDR-(dev<<3);
+        while ((addr->parcsr & RQA) == 0);
+        addr->parobuf = w;
+}
+
+setprior(prior)
+int prior;
+{
+        int oldprior;
+        char psw;
+
+        psw = mfps();
+        oldprior = psw & 0200;
+        psw =& 0177;
+        if (prior) psw =| 0200;
+        mtps(psw);
+        return(oldprior);
+}
